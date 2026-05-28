@@ -101,6 +101,18 @@ export function parseSubagentJsonLine(line: string): ParsedSubagentEvent | undef
 		error: stringField(maybeMessage, "errorMessage"),
 	};
 }
+function isCompletionReceipt(line: string): boolean {
+	return /^(?:done|completed|complete|task completed|analysis completed|subagent completed|i have completed.*|i've completed.*)$/i.test(
+		line.trim(),
+	);
+}
+
+export function cleanSubagentOutput(output: string): string {
+	const lines = output.trim().split("\n");
+	while (lines.length > 0 && isCompletionReceipt(lines[0])) lines.shift();
+	while (lines.length > 0 && isCompletionReceipt(lines[lines.length - 1])) lines.pop();
+	return lines.join("\n").trim();
+}
 
 export function parseSubagentProgressLine(line: string): MetampSubagentProgressEvent | undefined {
 	const event = parseJsonLine(line);
@@ -243,7 +255,7 @@ export async function runMetampSubagent(input: MetampSubagentRunInput): Promise<
 			agent: agent.name,
 			task: input.task,
 			exitCode: stderr && exitCode === 0 ? 1 : exitCode,
-			output: latestOutput,
+			output: cleanSubagentOutput(latestOutput),
 			stderr,
 		};
 	} finally {

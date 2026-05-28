@@ -7,6 +7,7 @@ import { getMetampSubagent, listMetampSubagents } from "../src/subagents/agents.
 import { discoverMetampSubagents } from "../src/subagents/discovery.ts";
 import {
 	buildMetampSubagentPrompt,
+	cleanSubagentOutput,
 	getHarnessInvocation,
 	parseSubagentJsonLine,
 	parseSubagentProgressLine,
@@ -116,6 +117,14 @@ describe("Metamp horizontal subagents", () => {
 		expect(
 			parseSubagentProgressLine(JSON.stringify({ type: "tool_execution_start", toolName: "metamp_project_state" })),
 		).toEqual({ type: "tool", text: "tool started: metamp_project_state" });
+	});
+
+	it("strips standalone subagent completion receipts", () => {
+		expect(cleanSubagentOutput("Findings\ncompleted")).toBe("Findings");
+		expect(cleanSubagentOutput("done\nFindings")).toBe("Findings");
+		expect(cleanSubagentOutput("Findings\nThis column is complete enough to use.")).toBe(
+			"Findings\nThis column is complete enough to use.",
+		);
 	});
 
 	it("formats failed subagent output for tool results", () => {
