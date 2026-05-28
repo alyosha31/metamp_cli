@@ -79,6 +79,10 @@ export interface RunManifest {
 	status: RunStatus;
 	command: string[];
 	cwd: string;
+	python?: {
+		executable: string;
+		version?: string;
+	};
 	recipePath: string;
 	inputs: Record<string, unknown>;
 	outputs: Record<string, unknown>;

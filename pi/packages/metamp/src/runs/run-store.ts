@@ -62,6 +62,8 @@ export async function writeRun(root: string, manifest: RunManifest): Promise<voi
 
 export interface CreateRunInput {
 	recipePath: string;
+	command?: string[];
+	python?: RunManifest["python"];
 	inputs?: Record<string, unknown>;
 	parentRunId?: string;
 }
@@ -75,8 +77,9 @@ export async function createQueuedRun(root: string, input: CreateRunInput): Prom
 		schemaVersion: METAMP_SCHEMA_VERSION,
 		runId,
 		status: "queued",
-		command: ["python3", recipeRelative],
+		command: input.command ?? [recipeRelative],
 		cwd: root,
+		...(input.python ? { python: input.python } : {}),
 		recipePath: recipeRelative,
 		inputs: input.inputs ?? {},
 		outputs: {},

@@ -8,6 +8,7 @@ import { createMetampExtension } from "./extension.ts";
 import { registerDataset } from "./project/datasets.ts";
 import { initProject } from "./project/init.ts";
 import { findProjectRoot, requireProjectRoot } from "./project/paths.ts";
+import { getPythonEnvPaths } from "./project/python-env.ts";
 import { formatProjectState, loadProjectState } from "./project/state.ts";
 import { listRuns, promoteRun } from "./runs/run-store.ts";
 
@@ -72,8 +73,11 @@ async function initCommand(args: string[]): Promise<void> {
 	const name = args[0];
 	if (!name) throw new Error("Usage: metamp init <project-name|.>");
 	const result = await initProject(name, process.cwd());
+	const python = getPythonEnvPaths(result.root);
 	console.log(`Initialized Metamp project: ${result.project.name}`);
+	console.log("created .venv");
 	if (name !== ".") console.log(`cd ${path.relative(process.cwd(), result.root) || "."}`);
+	console.log(`${python.relativePythonPath} -m pip install <packages>`);
 	console.log("metamp add-data <path>");
 	console.log("metamp copilot");
 }

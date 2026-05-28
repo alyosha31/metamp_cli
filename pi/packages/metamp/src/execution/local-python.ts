@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RunManifest } from "../manifests/schema.ts";
 import { assertInsidePath, assertProjectRelativeUnder, toProjectRelative } from "../project/paths.ts";
+import { assertProjectPythonEnv, getPythonVersion } from "../project/python-env.ts";
 import { createQueuedRun, runDir, updateRunStatus } from "../runs/run-store.ts";
 import type { ExecutionBackend, RunRecipeInput, RunRecipeResult } from "./backend.ts";
 
@@ -61,8 +62,14 @@ export class LocalPythonExecutionBackend implements ExecutionBackend {
 	async runRecipe(input: RunRecipeInput, signal?: AbortSignal): Promise<RunRecipeResult> {
 		const recipeAbsolute = assertProjectRelativeUnder(input.projectRoot, input.recipePath, "recipes");
 		const recipeRelative = toProjectRelative(input.projectRoot, recipeAbsolute);
+		const python = await assertProjectPythonEnv(input.projectRoot);
+		const version = await getPythonVersion(python.pythonPath);
+		const pythonMetadata: NonNullable<RunManifest["python"]> = { executable: python.relativePythonPath };
+		if (version) pythonMetadata.version = version;
 		const manifest = await createQueuedRun(input.projectRoot, {
 			recipePath: recipeRelative,
+			command: [python.relativePythonPath, recipeRelative],
+			python: pythonMetadata,
 			inputs: input.inputs,
 			parentRunId: input.parentRunId,
 		});
@@ -78,7 +85,7 @@ export class LocalPythonExecutionBackend implements ExecutionBackend {
 		let stdout = "";
 		let stderr = "";
 
-		const child = spawn("python3", [recipeRelative], {
+		const child = spawn(python.pythonPath, [recipeRelative], {
 			cwd: input.projectRoot,
 			env: {
 				...process.env,

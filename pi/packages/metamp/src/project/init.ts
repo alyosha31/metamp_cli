@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { writeYamlFile } from "../manifests/io.ts";
 import {
@@ -9,6 +9,7 @@ import {
 	type ProjectManifest,
 } from "../manifests/schema.ts";
 import { ensureProjectDirs, findProjectRoot, getMetampPaths } from "./paths.ts";
+import { createProjectPythonEnv } from "./python-env.ts";
 
 export interface InitProjectResult {
 	root: string;
@@ -48,6 +49,8 @@ export async function initProject(name: string, cwd: string): Promise<InitProjec
 		throw new Error(`${projectRoot} already contains .metamp`);
 	}
 
+	await mkdir(projectRoot, { recursive: true });
+	await createProjectPythonEnv(projectRoot);
 	await ensureProjectDirs(projectRoot);
 	const paths = getMetampPaths(projectRoot);
 	const now = new Date().toISOString();

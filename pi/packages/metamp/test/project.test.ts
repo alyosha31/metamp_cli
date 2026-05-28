@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { proposeDecision, recordDecision } from "../src/decisions/decision-store
 import { buildHandoffMarkdown } from "../src/handoff/build-handoff.ts";
 import { initProject } from "../src/project/init.ts";
 import { assertProjectRelativeUnder, findProjectRoot } from "../src/project/paths.ts";
+import { assertProjectPythonEnv, getPythonVersion } from "../src/project/python-env.ts";
 import { formatProjectState, loadProjectState } from "../src/project/state.ts";
 
 async function tempRoot(): Promise<string> {
@@ -18,12 +19,43 @@ describe("Metamp project manifests", () => {
 		const result = await initProject("taxi fare", cwd);
 		const nested = path.join(result.root, "recipes", "nested");
 		await writeFile(path.join(result.root, "recipes", "placeholder.txt"), "ok", "utf8");
+		const python = await assertProjectPythonEnv(result.root);
+		const version = await getPythonVersion(python.pythonPath);
 
+		expect(python.relativePythonPath).toBe(
+			process.platform === "win32" ? ".venv/Scripts/python.exe" : ".venv/bin/python",
+		);
+		expect(version).toMatch(/^Python \d+\./);
 		await expect(findProjectRoot(nested)).resolves.toBe(result.root);
 		const state = await loadProjectState(result.root);
 		expect(state.project.name).toBe("taxi-fare");
 		expect(state.datasets.datasets).toEqual([]);
 		expect(formatProjectState(state)).toContain("Project: taxi-fare");
+	});
+
+	it("fails init without writing manifests when venv creation fails", async () => {
+		const cwd = await tempRoot();
+		const emptyPath = path.join(cwd, "empty-bin");
+		await mkdir(emptyPath);
+		const pathEnvKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
+		const originalPath = process.env[pathEnvKey];
+		process.env[pathEnvKey] = emptyPath;
+		try {
+			await expect(initProject("broken", cwd)).rejects.toThrow("Failed to create project Python environment");
+		} finally {
+			if (originalPath === undefined) {
+				delete process.env[pathEnvKey];
+			} else {
+				process.env[pathEnvKey] = originalPath;
+			}
+		}
+
+		await expect(readFile(path.join(cwd, "broken", ".metamp", "project.yaml"), "utf8")).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+		await expect(findProjectRoot(path.join(cwd, "broken"))).resolves.toBeUndefined();
+		const retry = await initProject("broken", cwd);
+		expect(retry.root).toBe(path.join(cwd, "broken"));
 	});
 
 	it("rejects project-relative paths that escape allowed directories", async () => {
