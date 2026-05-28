@@ -3,8 +3,13 @@ export { LocalPythonExecutionBackend } from "./execution/local-python.ts";
 export { createMetampExtension } from "./extension.ts";
 export { buildHandoffMarkdown, writeHandoff } from "./handoff/build-handoff.ts";
 export type {
+	ApprovalRequest,
+	ApprovalsManifest,
 	DatasetManifestEntry,
 	DecisionEntry,
+	ManifestNamespace,
+	NamespacedEntry,
+	NamespacedNotesManifest,
 	ProjectManifest,
 	ProjectState,
 	RunManifest,

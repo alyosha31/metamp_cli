@@ -1,18 +1,36 @@
 export const METAMP_SCHEMA_VERSION = 1;
 
+export const BUILTIN_MANIFEST_NAMESPACES = [
+	"profiles",
+	"schema",
+	"quality",
+	"leakage",
+	"experiments",
+	"interpretations",
+	"reproducibility",
+	"reports",
+] as const;
+
+export const DECISION_TYPES = [
+	"target",
+	"problem_type",
+	"split",
+	"metric",
+	"cleaning",
+	"leakage",
+	"promotion",
+	"custom",
+] as const;
 export type ProblemType = "classification" | "regression" | "forecasting" | "ranking" | "clustering" | "custom";
-export type DecisionType =
-	| "target"
-	| "problem_type"
-	| "split"
-	| "metric"
-	| "cleaning"
-	| "leakage"
-	| "promotion"
-	| "custom";
+export type DecisionType = (typeof DECISION_TYPES)[number];
 export type DecisionStatus = "pending" | "approved" | "rejected" | "superseded";
+export type DecisionAuthority = "none" | "propose" | "approve";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type DatasetStorageMode = "copy" | "link";
+export type BuiltinManifestNamespace = (typeof BUILTIN_MANIFEST_NAMESPACES)[number];
+export type ManifestNamespace = BuiltinManifestNamespace | `custom.${string}`;
+export type ApprovalAction = "write_manifest" | "write_report" | "write_recipe" | "write_artifact" | "decision";
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "superseded";
 
 export interface ProjectManifest {
 	schemaVersion: number;
@@ -73,6 +91,41 @@ export interface DecisionsManifest {
 	decisions: DecisionEntry[];
 }
 
+export interface NamespacedEntry {
+	id: string;
+	owner: string;
+	kind: string;
+	value: unknown;
+	rationale?: string;
+	evidence?: string[];
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface NamespacedNotesManifest {
+	schemaVersion: number;
+	namespace: ManifestNamespace;
+	entries: NamespacedEntry[];
+}
+
+export interface ApprovalRequest {
+	id: string;
+	requester: string;
+	action: ApprovalAction;
+	targetResource: string;
+	targetOwner?: string;
+	proposedValue: unknown;
+	rationale: string;
+	status: ApprovalStatus;
+	createdAt: string;
+	decidedAt?: string;
+}
+
+export interface ApprovalsManifest {
+	schemaVersion: number;
+	approvals: ApprovalRequest[];
+}
+
 export interface RunManifest {
 	schemaVersion: number;
 	runId: string;
@@ -102,5 +155,7 @@ export interface ProjectState {
 	project: ProjectManifest;
 	datasets: DatasetsManifest;
 	decisions: DecisionsManifest;
+	namespaceManifests: NamespacedNotesManifest[];
+	approvals: ApprovalsManifest;
 	runs: RunManifest[];
 }

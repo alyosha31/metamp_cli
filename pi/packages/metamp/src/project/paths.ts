@@ -1,11 +1,23 @@
 import { mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { BUILTIN_MANIFEST_NAMESPACES, type BuiltinManifestNamespace } from "../manifests/schema.ts";
 
 export const METAMP_DIR = ".metamp";
 export const PROJECT_MANIFEST = "project.yaml";
 export const DATASETS_MANIFEST = "datasets.yaml";
 export const DECISIONS_MANIFEST = "decisions.yaml";
+export const APPROVALS_MANIFEST = "approvals.yaml";
 
+export const OWNED_REPORT_DIRS = [
+	"reports/profiles",
+	"reports/schema",
+	"reports/quality",
+	"reports/leakage",
+	"reports/experiments",
+	"reports/results",
+	"reports/reproducibility",
+	"reports/drafts",
+] as const;
 export interface MetampPaths {
 	root: string;
 	dataDir: string;
@@ -18,10 +30,15 @@ export interface MetampPaths {
 	projectManifest: string;
 	datasetsManifest: string;
 	decisionsManifest: string;
+	approvalsManifest: string;
+	namespaceManifests: Record<BuiltinManifestNamespace, string>;
 }
 
 export function getMetampPaths(root: string): MetampPaths {
 	const metampDir = path.join(root, METAMP_DIR);
+	const namespaceManifests = Object.fromEntries(
+		BUILTIN_MANIFEST_NAMESPACES.map((namespace) => [namespace, path.join(metampDir, `${namespace}.yaml`)]),
+	) as Record<BuiltinManifestNamespace, string>;
 	return {
 		root,
 		dataDir: path.join(root, "data"),
@@ -34,6 +51,8 @@ export function getMetampPaths(root: string): MetampPaths {
 		projectManifest: path.join(metampDir, PROJECT_MANIFEST),
 		datasetsManifest: path.join(metampDir, DATASETS_MANIFEST),
 		decisionsManifest: path.join(metampDir, DECISIONS_MANIFEST),
+		approvalsManifest: path.join(metampDir, APPROVALS_MANIFEST),
+		namespaceManifests,
 	};
 }
 
@@ -114,5 +133,6 @@ export async function ensureProjectDirs(root: string): Promise<void> {
 		mkdir(paths.artifactsDir, { recursive: true }),
 		mkdir(paths.runsDir, { recursive: true }),
 		mkdir(paths.handoffsDir, { recursive: true }),
+		...OWNED_REPORT_DIRS.map((dir) => mkdir(path.join(root, dir), { recursive: true })),
 	]);
 }

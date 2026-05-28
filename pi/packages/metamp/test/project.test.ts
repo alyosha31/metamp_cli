@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -30,6 +30,22 @@ describe("Metamp project manifests", () => {
 		const state = await loadProjectState(result.root);
 		expect(state.project.name).toBe("taxi-fare");
 		expect(state.datasets.datasets).toEqual([]);
+		expect(state.approvals.approvals).toEqual([]);
+		expect(state.namespaceManifests.map((manifest) => manifest.namespace)).toEqual([
+			"profiles",
+			"schema",
+			"quality",
+			"leakage",
+			"experiments",
+			"interpretations",
+			"reproducibility",
+			"reports",
+		]);
+		await expect(readFile(path.join(result.root, ".metamp", "approvals.yaml"), "utf8")).resolves.toContain(
+			"approvals: []",
+		);
+		const leakageDir = await stat(path.join(result.root, "reports", "leakage"));
+		expect(leakageDir.isDirectory()).toBe(true);
 		expect(formatProjectState(state)).toContain("Project: taxi-fare");
 	});
 
