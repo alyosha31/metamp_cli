@@ -1,16 +1,45 @@
 import path from "node:path";
-import type { ExtensionAPI, ExtensionFactory, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { LocalPythonExecutionBackend } from "./execution/local-python.ts";
 import { writeHandoff } from "./handoff/build-handoff.ts";
 import { findProjectRoot, isInsidePath, requireProjectRoot } from "./project/paths.ts";
 import { formatProjectState, loadProjectState } from "./project/state.ts";
 import { promoteRun } from "./runs/run-store.ts";
+import { discoverMetampSubagents, findMetampAgentSpec } from "./subagents/discovery.ts";
+import { type MetampSubagentProgressEvent, runMetampSubagent } from "./subagents/runner.ts";
 import { registerMetampTools } from "./tools/metamp-tools.ts";
 
 const METAMP_CONTEXT_HEADER = `You are Metamp, an ML/data-science copilot workbench layered on the Metamp harness.
 
 Durable project state lives in .metamp manifests. Treat those manifests as source of truth over chat history. Inspect freely and propose freely, but require user approval before material ML decisions or destructive/expensive actions. Material decisions include target column, problem type, split strategy, metrics, leakage-sensitive columns, row/column dropping rules, expensive training runs, and run promotion. Record decisions before doing dependent work. Use metamp_* tools for project state, recipes, runs, promotion, and handoff.`;
 
+function installMetampHeader(ctx: ExtensionContext): void {
+	if (!ctx.hasUI) return;
+	ctx.ui.setHeader((_tui, theme) => ({
+		render(_width: number): string[] {
+			const accent = (text: string) => theme.bold(theme.fg("accent", text));
+			const muted = (text: string) => theme.fg("muted", text);
+			const dim = (text: string) => theme.fg("dim", text);
+			return [
+				"",
+				accent("▗▖  ▗▖ ▗▄▄▄▖▗▄▄▄▖ ▗▄▖ ▗▖  ▗▖▗▄▄▖"),
+				accent("▐▛▚▞▜▌ ▐▌    █  ▐▌ ▐▌▐▛▚▞▜▌▐▌ ▐▌"),
+				accent("▐▌  ▐▌ ▐▛▀   █  ▐▛▀▜▌▐▌  ▐▌▐▛▀▘"),
+				accent("▐▌  ▐▌ ▐▙▄▄▖ █  ▐▌ ▐▌▐▌  ▐▌▐▌"),
+				`${accent("metamp")} ${muted("ML copilot workbench")}`,
+				dim("escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more"),
+				dim("specialists: /data-profiler · /schema-detective · /quality-auditor · /leakage-auditor"),
+				"",
+			];
+		},
+		invalidate() {},
+	}));
+	ctx.ui.setWidget(
+		"metamp-brand",
+		["metamp · ML copilot workbench", "specialists: /data-profiler · /schema-detective · /leakage-auditor"],
+		{ placement: "aboveEditor" },
+	);
+}
 function eventPath(event: ToolCallEvent): string | undefined {
 	if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
 	const input = event.input as { path?: unknown };
@@ -34,12 +63,67 @@ function commandHasOutsideAbsolutePath(command: string, root: string): boolean {
 	return false;
 }
 
+async function subagentModelOptions(ctx: ExtensionContext): Promise<{ model?: string; apiKey?: string }> {
+	if (!ctx.model) return {};
+	return {
+		model: `${ctx.model.provider}/${ctx.model.id}`,
+		apiKey: await ctx.modelRegistry.getApiKeyForProvider(ctx.model.provider),
+	};
+}
+
 async function metampRootFromCwd(cwd: string): Promise<string | undefined> {
 	return findProjectRoot(cwd);
 }
 
+function compactProgressText(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function appendBoundedProgressLine(lines: string[], line: string): void {
+	const compact = compactProgressText(line);
+	if (!compact) return;
+	if (lines.at(-1) === compact) return;
+	lines.push(compact.length > 160 ? `${compact.slice(0, 157)}...` : compact);
+	while (lines.length > 8) lines.splice(1, 1);
+}
+
+function createSubagentProgressView(ctx: ExtensionContext, agentName: string, task: string) {
+	const lines = [`${agentName} running: ${task}`];
+	let thinking = "";
+	let text = "";
+	const render = () => ctx.ui.setWidget("metamp-subagent", lines, { placement: "aboveEditor" });
+	render();
+	return {
+		onProgress(event: MetampSubagentProgressEvent): void {
+			if (event.type === "thinking") {
+				thinking = `${thinking}${event.text}`.slice(-240);
+				const compact = compactProgressText(thinking);
+				if (compact) {
+					lines[1] = `thinking: ${compact.length > 160 ? `${compact.slice(-157)}...` : compact}`;
+					render();
+				}
+				return;
+			}
+			if (event.type === "text") {
+				text = `${text}${event.text}`.slice(-240);
+				const compact = compactProgressText(text);
+				if (compact) {
+					lines[2] = `drafting: ${compact.length > 160 ? `${compact.slice(-157)}...` : compact}`;
+					render();
+				}
+				return;
+			}
+			appendBoundedProgressLine(lines, event.text);
+			render();
+		},
+		dispose(): void {
+			ctx.ui.setWidget("metamp-subagent", undefined, { placement: "aboveEditor" });
+		},
+	};
+}
+
 export function createMetampExtension(): ExtensionFactory {
-	return (pi: ExtensionAPI) => {
+	return async (pi: ExtensionAPI) => {
 		registerMetampTools(pi);
 
 		pi.on("before_agent_start", async (event, ctx) => {
@@ -47,8 +131,9 @@ export function createMetampExtension(): ExtensionFactory {
 			if (!root) return undefined;
 			const state = await loadProjectState(root);
 			const pending = state.decisions.decisions.filter((decision) => decision.status === "pending");
+			const pendingApprovals = state.approvals.approvals.filter((approval) => approval.status === "pending");
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n${METAMP_CONTEXT_HEADER}\n\nCurrent Metamp project state:\n${formatProjectState(state)}\n\nPending decisions:\n${pending.map((decision) => `- ${decision.id} ${decision.type}: ${JSON.stringify(decision.proposedValue)}`).join("\n") || "none"}`,
+				systemPrompt: `${event.systemPrompt}\n\n${METAMP_CONTEXT_HEADER}\n\nCurrent Metamp project state:\n${formatProjectState(state)}\n\nPending decisions:\n${pending.map((decision) => `- ${decision.id} ${decision.type}: ${JSON.stringify(decision.proposedValue)}`).join("\n") || "none"}\n\nPending approvals:\n${pendingApprovals.map((approval) => `- ${approval.id} ${approval.action} ${approval.targetResource}`).join("\n") || "none"}`,
 			};
 		});
 
@@ -72,15 +157,17 @@ export function createMetampExtension(): ExtensionFactory {
 			return undefined;
 		});
 
-		pi.on("session_start", async (_event, ctx) => {
+		pi.on("session_start", async (event, ctx) => {
 			const root = await metampRootFromCwd(ctx.cwd);
 			if (!root) return;
 			const state = await loadProjectState(root);
+			installMetampHeader(ctx);
 			ctx.ui.setTitle(`metamp: ${state.project.name}`);
 			ctx.ui.setStatus(
 				"metamp",
 				`${state.project.name} · ${state.datasets.datasets.length} datasets · ${state.runs.length} runs`,
 			);
+			if (event.reason === "startup") ctx.ui.notify(`Metamp status\n${formatProjectState(state)}`, "info");
 		});
 
 		pi.on("session_before_tree", async (_event, ctx) => {
@@ -95,6 +182,61 @@ export function createMetampExtension(): ExtensionFactory {
 			};
 		});
 
+		const registerSubagentCommand = (commandName: string, agentName: string, description: string) => {
+			pi.registerCommand(commandName, {
+				description,
+				handler: async (args, ctx) => {
+					const task = args.trim();
+					if (!task) {
+						ctx.ui.notify(`Usage: /${commandName} <task>`, "error");
+						return;
+					}
+					const root = await requireProjectRoot(ctx.cwd);
+					const resolvedAgent = await findMetampAgentSpec(agentName, { projectRoot: root });
+					let allowProjectLocalAgent = false;
+					if (resolvedAgent?.requiresConfirmation) {
+						const confirmed = await ctx.ui.confirm(
+							"Run project-local Metamp subagent",
+							`Run ${resolvedAgent.name} from ${resolvedAgent.definitionPath ?? "project configuration"}?`,
+						);
+						if (!confirmed) return;
+						allowProjectLocalAgent = true;
+					}
+					const runningText = `${agentName} running: ${task}`;
+					const progressView = createSubagentProgressView(ctx, agentName, task);
+					ctx.ui.setStatus("metamp-subagent", `${agentName} running`);
+					ctx.ui.notify(runningText, "info");
+					try {
+						const modelOptions = await subagentModelOptions(ctx);
+						const result = await runMetampSubagent({
+							projectRoot: root,
+							agentName,
+							task,
+							signal: ctx.signal,
+							...modelOptions,
+							allowProjectLocalAgent,
+							onProgress: progressView.onProgress,
+						});
+						if (result.exitCode === 0) {
+							const output = result.output || "(no output)";
+							await ctx.ui.editor(`${agentName} result`, output);
+						} else {
+							ctx.ui.notify(result.stderr || result.output || `${agentName} failed`, "error");
+						}
+					} finally {
+						ctx.ui.setStatus("metamp-subagent", undefined);
+						progressView.dispose();
+					}
+				},
+			});
+		};
+
+		for (const agent of await discoverMetampSubagents()) {
+			registerSubagentCommand(agent.name, agent.name, agent.description);
+			if (agent.name === "data-profiler") {
+				registerSubagentCommand("dataset-profiler", agent.name, `${agent.description} Alias for /data-profiler.`);
+			}
+		}
 		pi.registerCommand("metamp-status", {
 			description: "Show Metamp project state",
 			handler: async (_args, ctx) => {
