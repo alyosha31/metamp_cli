@@ -1,6 +1,6 @@
 {
 	"name": "metamp",
-	"version": "0.75.5",
+	"version": "0.1.0",
 	"description": "ML/data-science copilot workbench on the Pi coding-agent harness",
 	"type": "module",
 	"bin": {

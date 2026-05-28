@@ -1,12 +1,12 @@
 {
 	"name": "@earendil-works/pi-coding-agent",
-	"version": "0.75.5",
+	"version": "0.1.0",
 	"lockfileVersion": 3,
 	"requires": true,
 	"packages": {
 		"": {
 			"name": "@earendil-works/pi-coding-agent",
-			"version": "0.75.5",
+			"version": "0.1.0",
 			"license": "MIT",
 			"dependencies": {
 				"@earendil-works/pi-agent-core": "^0.75.5",
@@ -31,7 +31,7 @@
 				"@mariozechner/clipboard": "0.3.6"
 			},
 			"bin": {
-				"pi": "dist/cli.js"
+				"metamp-harness": "dist/cli.js"
 			},
 			"engines": {
 				"node": ">=22.19.0"
