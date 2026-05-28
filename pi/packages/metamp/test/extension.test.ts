@@ -51,12 +51,17 @@ describe("Metamp extension", () => {
 				"metamp_register_dataset",
 				"metamp_propose_decision",
 				"metamp_record_decision",
+				"metamp_write_owned_report",
+				"metamp_update_owned_manifest",
+				"metamp_request_cross_scope_change",
+				"metamp_list_subagents",
 				"metamp_write_recipe",
 				"metamp_run_recipe",
 				"metamp_read_run",
 				"metamp_compare_runs",
 				"metamp_promote_run",
 				"metamp_handoff_context",
+				"metamp_subagent",
 			]),
 		);
 		expect(api.commands).toEqual(
@@ -69,8 +74,18 @@ describe("Metamp extension", () => {
 				"metamp-promote",
 				"metamp-handoff",
 				"metamp-fork",
+				"data-profiler",
+				"dataset-profiler",
+				"schema-detective",
+				"quality-auditor",
+				"leakage-auditor",
+				"experiment-designer",
+				"result-interpreter",
+				"reproducibility-auditor",
+				"report-writer",
 			]),
 		);
+		expect(api.commands).not.toContain("metamp-data-profiler");
 	});
 
 	it("injects manifest-grounded context before agent starts", async () => {
@@ -88,6 +103,48 @@ describe("Metamp extension", () => {
 				systemPrompt: expect.stringContaining("Project: context"),
 			}),
 		);
+		expect((result as { systemPrompt?: string } | undefined)?.systemPrompt).toContain("Pending approvals:");
+	});
+
+	it("installs the Metamp startup header and logs status inside the TUI", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("header", cwd);
+		const api = createRecordingApi();
+		await createMetampExtension()(api as unknown as ExtensionAPI);
+		const handler = api.events.get("session_start")?.[0];
+		let headerFactory: unknown;
+		const notifications: string[] = [];
+		const widgets: string[][] = [];
+		expect(handler).toBeDefined();
+
+		await handler?.({ reason: "startup" }, {
+			cwd: project.root,
+			hasUI: true,
+			ui: {
+				setHeader(factory: unknown) {
+					headerFactory = factory;
+				},
+				setWidget(_key: string, content: string[] | undefined) {
+					if (content) widgets.push(content);
+				},
+				setTitle() {},
+				setStatus() {},
+				notify(message: string) {
+					notifications.push(message);
+				},
+			},
+		} as unknown as ExtensionContext);
+		const rendered =
+			typeof headerFactory === "function"
+				? headerFactory({}, { bold: (text: string) => text, fg: (_color: string, text: string) => text }).render(80)
+				: [];
+
+		expect(rendered.join("\n")).toContain("metamp");
+		expect(rendered.join("\n")).toContain("/data-profiler");
+		expect(widgets.flat().join("\n")).toContain("metamp");
+		expect(widgets.flat().join("\n")).toContain("/schema-detective");
+		expect(notifications).toEqual([expect.stringContaining("Metamp status")]);
+		expect(notifications[0]).toContain("Project: header");
 	});
 
 	it("blocks file mutations outside the Metamp project root", async () => {
