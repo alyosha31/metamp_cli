@@ -13,6 +13,15 @@ const METAMP_CONTEXT_HEADER = `You are Metamp, an ML/data-science copilot workbe
 
 Durable project state lives in .metamp manifests. Treat those manifests as source of truth over chat history. Inspect freely and propose freely, but require user approval before material ML decisions or destructive/expensive actions. Material decisions include target column, problem type, split strategy, metrics, leakage-sensitive columns, row/column dropping rules, expensive training runs, and run promotion. Record decisions before doing dependent work. Use metamp_* tools for project state, recipes, runs, promotion, and handoff.`;
 
+interface SubagentProgressState {
+	agentName: string;
+	task: string;
+	status: string;
+	thinking: string;
+	drafting: string;
+	activity: string[];
+}
+
 function installMetampHeader(ctx: ExtensionContext): void {
 	if (!ctx.hasUI) return;
 	ctx.ui.setHeader((_tui, theme) => ({
@@ -40,6 +49,7 @@ function installMetampHeader(ctx: ExtensionContext): void {
 		{ placement: "aboveEditor" },
 	);
 }
+
 function eventPath(event: ToolCallEvent): string | undefined {
 	if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
 	const input = event.input as { path?: unknown };
@@ -79,47 +89,109 @@ function compactProgressText(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
 }
 
-function appendBoundedProgressLine(lines: string[], line: string): void {
-	const compact = compactProgressText(line);
-	if (!compact) return;
-	if (lines.at(-1) === compact) return;
-	lines.push(compact.length > 160 ? `${compact.slice(0, 157)}...` : compact);
-	while (lines.length > 8) lines.splice(1, 1);
+function clipText(text: string, width: number): string {
+	if (width <= 1) return "";
+	return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
 }
 
-function createSubagentProgressView(ctx: ExtensionContext, agentName: string, task: string) {
-	const lines = [`${agentName} running: ${task}`];
-	let thinking = "";
-	let text = "";
-	const render = () => ctx.ui.setWidget("metamp-subagent", lines, { placement: "aboveEditor" });
-	render();
-	return {
-		onProgress(event: MetampSubagentProgressEvent): void {
-			if (event.type === "thinking") {
-				thinking = `${thinking}${event.text}`.slice(-240);
-				const compact = compactProgressText(thinking);
-				if (compact) {
-					lines[1] = `thinking: ${compact.length > 160 ? `${compact.slice(-157)}...` : compact}`;
-					render();
-				}
-				return;
-			}
-			if (event.type === "text") {
-				text = `${text}${event.text}`.slice(-240);
-				const compact = compactProgressText(text);
-				if (compact) {
-					lines[2] = `drafting: ${compact.length > 160 ? `${compact.slice(-157)}...` : compact}`;
-					render();
-				}
-				return;
-			}
-			appendBoundedProgressLine(lines, event.text);
-			render();
+function appendActivity(state: SubagentProgressState, line: string): void {
+	const compact = compactProgressText(line);
+	if (!compact || state.activity.at(-1) === compact) return;
+	state.activity.push(compact);
+	while (state.activity.length > 6) state.activity.shift();
+}
+
+function createSubagentProgressState(agentName: string, task: string): SubagentProgressState {
+	return { agentName, task, status: "starting", thinking: "", drafting: "", activity: [] };
+}
+
+function applySubagentProgress(state: SubagentProgressState, event: MetampSubagentProgressEvent): void {
+	if (event.type === "thinking") {
+		state.status = "thinking";
+		state.thinking = `${state.thinking}${event.text}`.slice(-500);
+		return;
+	}
+	if (event.type === "text") {
+		state.status = "drafting";
+		state.drafting = `${state.drafting}${event.text}`.slice(-500);
+		return;
+	}
+	state.status = event.type === "error" ? "error" : event.type;
+	appendActivity(state, event.text);
+}
+
+function renderSubagentProgressOverlay(
+	state: SubagentProgressState,
+	width: number,
+	theme: { bold(text: string): string; fg(color: string, text: string): string },
+): string[] {
+	const boxWidth = Math.max(48, Math.min(width - 4, 100));
+	const inner = boxWidth - 4;
+	const border = theme.fg("borderMuted", "─".repeat(Math.max(0, boxWidth - 2)));
+	const line = (text = "") =>
+		`${theme.fg("borderMuted", "│")} ${clipText(text, inner).padEnd(inner)} ${theme.fg("borderMuted", "│")}`;
+	const section = (label: string) => line(theme.fg("muted", label));
+	const lines = [
+		`${theme.fg("borderMuted", "┌")}${border}${theme.fg("borderMuted", "┐")}`,
+		line(`${theme.bold(theme.fg("accent", state.agentName))} ${theme.fg("dim", state.status)}`),
+		line(theme.fg("dim", `task: ${state.task}`)),
+		section("thought process"),
+	];
+	const thinking = compactProgressText(state.thinking);
+	lines.push(
+		line(thinking ? `thinking: ${thinking}` : theme.fg("dim", "thinking: waiting for model reasoning events")),
+	);
+	const drafting = compactProgressText(state.drafting);
+	if (drafting) lines.push(line(`drafting: ${drafting}`));
+	lines.push(section("activity"));
+	if (state.activity.length === 0) lines.push(line(theme.fg("dim", "no events yet")));
+	else for (const item of state.activity) lines.push(line(item));
+	lines.push(`${theme.fg("borderMuted", "└")}${border}${theme.fg("borderMuted", "┘")}`);
+	return lines;
+}
+
+async function runSubagentWithProgressOverlay(
+	ctx: ExtensionContext,
+	input: {
+		projectRoot: string;
+		agentName: string;
+		task: string;
+		allowProjectLocalAgent: boolean;
+	},
+) {
+	const state = createSubagentProgressState(input.agentName, input.task);
+	let requestRender: (() => void) | undefined;
+	const modelOptions = await subagentModelOptions(ctx);
+	const runPromise = runMetampSubagent({
+		projectRoot: input.projectRoot,
+		agentName: input.agentName,
+		task: input.task,
+		signal: ctx.signal,
+		...modelOptions,
+		allowProjectLocalAgent: input.allowProjectLocalAgent,
+		onProgress(event) {
+			applySubagentProgress(state, event);
+			requestRender?.();
 		},
-		dispose(): void {
-			ctx.ui.setWidget("metamp-subagent", undefined, { placement: "aboveEditor" });
+	});
+	await ctx.ui.custom<void>(
+		(tui, theme, _keybindings, done) => {
+			requestRender = () => tui.requestRender();
+			runPromise.finally(() => done());
+			return {
+				render(width: number): string[] {
+					return renderSubagentProgressOverlay(state, width, theme);
+				},
+				invalidate() {},
+				dispose() {},
+			};
 		},
-	};
+		{
+			overlay: true,
+			overlayOptions: { width: "85%", maxHeight: "60%", anchor: "center", nonCapturing: true },
+		},
+	);
+	return runPromise;
 }
 
 export function createMetampExtension(): ExtensionFactory {
@@ -203,19 +275,14 @@ export function createMetampExtension(): ExtensionFactory {
 						allowProjectLocalAgent = true;
 					}
 					const runningText = `${agentName} running: ${task}`;
-					const progressView = createSubagentProgressView(ctx, agentName, task);
 					ctx.ui.setStatus("metamp-subagent", `${agentName} running`);
 					ctx.ui.notify(runningText, "info");
 					try {
-						const modelOptions = await subagentModelOptions(ctx);
-						const result = await runMetampSubagent({
+						const result = await runSubagentWithProgressOverlay(ctx, {
 							projectRoot: root,
 							agentName,
 							task,
-							signal: ctx.signal,
-							...modelOptions,
 							allowProjectLocalAgent,
-							onProgress: progressView.onProgress,
 						});
 						if (result.exitCode === 0) {
 							const output = result.output || "(no output)";
@@ -225,7 +292,6 @@ export function createMetampExtension(): ExtensionFactory {
 						}
 					} finally {
 						ctx.ui.setStatus("metamp-subagent", undefined);
-						progressView.dispose();
 					}
 				},
 			});
@@ -233,9 +299,6 @@ export function createMetampExtension(): ExtensionFactory {
 
 		for (const agent of await discoverMetampSubagents()) {
 			registerSubagentCommand(agent.name, agent.name, agent.description);
-			if (agent.name === "data-profiler") {
-				registerSubagentCommand("dataset-profiler", agent.name, `${agent.description} Alias for /data-profiler.`);
-			}
 		}
 		pi.registerCommand("metamp-status", {
 			description: "Show Metamp project state",

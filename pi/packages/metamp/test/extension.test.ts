@@ -75,7 +75,6 @@ describe("Metamp extension", () => {
 				"metamp-handoff",
 				"metamp-fork",
 				"data-profiler",
-				"dataset-profiler",
 				"schema-detective",
 				"quality-auditor",
 				"leakage-auditor",
@@ -86,6 +85,7 @@ describe("Metamp extension", () => {
 			]),
 		);
 		expect(api.commands).not.toContain("metamp-data-profiler");
+		expect(api.commands).not.toContain("dataset-profiler");
 	});
 
 	it("injects manifest-grounded context before agent starts", async () => {
