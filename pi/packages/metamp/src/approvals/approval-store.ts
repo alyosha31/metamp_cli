@@ -21,6 +21,12 @@ function nextApprovalId(manifest: ApprovalsManifest): string {
 	return `approval_${String(max + 1).padStart(3, "0")}`;
 }
 
+function assertApprovalTransition(current: ApprovalStatus, next: ApprovalStatus): void {
+	if (next === current) return;
+	if (next === "pending") throw new Error("Approval record status cannot remain pending");
+	if (current !== "pending") throw new Error(`Approval ${current} cannot transition to ${next}`);
+}
+
 export interface CreateApprovalRequestInput {
 	requester: string;
 	action: ApprovalAction;
@@ -64,8 +70,11 @@ export async function recordApprovalRequest(root: string, input: RecordApprovalR
 	const manifest = await readApprovalRequests(root);
 	const index = manifest.approvals.findIndex((approval) => approval.id === input.id);
 	if (index < 0) throw new Error(`Unknown approval request ${input.id}`);
+	const current = manifest.approvals[index];
+	assertApprovalTransition(current.status, input.status);
+	if (current.status === input.status) return current;
 	const updated: ApprovalRequest = {
-		...manifest.approvals[index],
+		...current,
 		status: input.status,
 		decidedAt: new Date().toISOString(),
 	};

@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createApprovalRequest } from "../approvals/approval-store.ts";
+import { createApprovalRequest, recordApprovalRequest } from "../approvals/approval-store.ts";
 import { proposeDecision, recordDecision } from "../decisions/decision-store.ts";
 import { LocalPythonExecutionBackend } from "../execution/local-python.ts";
 import { writeHandoff } from "../handoff/build-handoff.ts";
@@ -20,12 +20,22 @@ import {
 	type NamespacedNotesManifest,
 } from "../manifests/schema.ts";
 import { registerDataset } from "../project/datasets.ts";
-import { assertProjectRelativeUnder, getMetampPaths, requireProjectRoot, toProjectRelative } from "../project/paths.ts";
+import {
+	assertProjectRelativeUnderCanonical,
+	getMetampPaths,
+	requireProjectRoot,
+	toProjectRelative,
+} from "../project/paths.ts";
 import { formatProjectState, loadProjectState } from "../project/state.ts";
 import { promoteRun, readRun } from "../runs/run-store.ts";
 import { listMetampSubagents } from "../subagents/agents.ts";
 import { discoverMetampSubagents, findMetampAgentSpec } from "../subagents/discovery.ts";
 import { classifyRequestedAction } from "../subagents/policy.ts";
+import {
+	applyMetampSubagentProgress,
+	createMetampSubagentProgressState,
+	snapshotMetampSubagentProgress,
+} from "../subagents/progress.ts";
 import { runMetampSubagent, subagentTextResult } from "../subagents/runner.ts";
 
 function textResult(text: string, details: unknown = {}): AgentToolResult<unknown> {
@@ -45,7 +55,8 @@ async function rootFromCtx(ctx: ExtensionContext): Promise<string> {
 }
 
 const decisionTypes = DECISION_TYPES;
-const decisionStatuses = ["pending", "approved", "rejected", "superseded"] as const;
+const decisionStatuses = ["approved", "rejected", "superseded"] as const;
+const approvalStatuses = ["approved", "rejected", "superseded"] as const;
 const approvalActions = ["write_manifest", "write_report", "write_recipe", "write_artifact", "decision"] as const;
 const manifestNamespaceSet = new Set<string>(BUILTIN_MANIFEST_NAMESPACES);
 
@@ -117,7 +128,7 @@ async function writeOrRequestOwnedReport(
 		});
 		return textResult(approvalText(approval.id, reportPath), approval);
 	}
-	const absolute = assertProjectRelativeUnder(root, reportPath, "reports");
+	const absolute = await assertProjectRelativeUnderCanonical(root, reportPath, "reports");
 	if (!overwrite) {
 		try {
 			await readFile(absolute, "utf8");
@@ -273,6 +284,23 @@ export function registerMetampTools(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "metamp_record_approval",
+		label: "Record Approval",
+		description: "Record an approved, rejected, or superseded approval request.",
+		parameters: Type.Object({
+			id: Type.String(),
+			status: Type.Union(approvalStatuses.map((status) => Type.Literal(status))),
+		}),
+		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+			const root = await rootFromCtx(ctx);
+			const approval = await recordApprovalRequest(root, {
+				id: params.id,
+				status: params.status as (typeof approvalStatuses)[number],
+			});
+			return textResult(`Recorded ${approval.id}: ${approval.status}`, approval);
+		},
+	});
+	pi.registerTool({
 		name: "metamp_write_owned_report",
 		label: "Write Owned Report",
 		description:
@@ -377,7 +405,7 @@ export function registerMetampTools(pi: ExtensionAPI): void {
 		execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
 			const root = await rootFromCtx(ctx);
 			const recipePath = params.path.startsWith("recipes/") ? params.path : `recipes/${params.path}`;
-			const absolute = assertProjectRelativeUnder(root, recipePath, "recipes");
+			const absolute = await assertProjectRelativeUnderCanonical(root, recipePath, "recipes");
 			if (!params.overwrite) {
 				try {
 					await readFile(absolute, "utf8");
@@ -490,7 +518,7 @@ export function registerMetampTools(pi: ExtensionAPI): void {
 			task: Type.String({ description: "Task for the subagent" }),
 			cwd: Type.Optional(Type.String({ description: "Optional working directory for the subagent process" })),
 		}),
-		execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+		execute: async (_toolCallId, params, signal, onUpdate, ctx) => {
 			const root = await rootFromCtx(ctx);
 			const agent = await findMetampAgentSpec(params.agent, { projectRoot: root });
 			let allowProjectLocalAgent = false;
@@ -507,6 +535,7 @@ export function registerMetampTools(pi: ExtensionAPI): void {
 				if (!confirmed) return textResult(`Cancelled ${agent.name}`, { agent: agent.name, cancelled: true });
 				allowProjectLocalAgent = true;
 			}
+			const progressState = createMetampSubagentProgressState(params.agent, params.task);
 			const modelOptions = await subagentModelOptions(ctx);
 			const result = await runMetampSubagent({
 				projectRoot: root,
@@ -516,6 +545,13 @@ export function registerMetampTools(pi: ExtensionAPI): void {
 				signal,
 				...modelOptions,
 				allowProjectLocalAgent,
+				onProgress(event) {
+					applyMetampSubagentProgress(progressState, event);
+					onUpdate?.({
+						content: [{ type: "text", text: event.text }],
+						details: { progress: snapshotMetampSubagentProgress(progressState) },
+					});
+				},
 			});
 			return subagentTextResult(result);
 		},

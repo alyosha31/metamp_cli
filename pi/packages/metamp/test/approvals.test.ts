@@ -63,7 +63,7 @@ describe("approval request store", () => {
 		expect(state.approvals.approvals[0]?.targetOwner).toBe("leakage-auditor");
 	});
 
-	it("records approval request lifecycle", async () => {
+	it("records approval request lifecycle and rejects terminal rewrites", async () => {
 		const cwd = await tempRoot();
 		const project = await initProject("approval-lifecycle", cwd);
 		const pending = await createApprovalRequest(project.root, {
@@ -74,10 +74,39 @@ describe("approval request store", () => {
 			rationale: "Cross-scope report write.",
 		});
 
-		const rejected = await recordApprovalRequest(project.root, { id: pending.id, status: "rejected" });
+		const approved = await recordApprovalRequest(project.root, { id: pending.id, status: "approved" });
 
-		expect(rejected.status).toBe("rejected");
-		expect(rejected.decidedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+		expect(approved.status).toBe("approved");
+		expect(approved.decidedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+		await expect(recordApprovalRequest(project.root, { id: pending.id, status: "rejected" })).rejects.toThrow(
+			"Approval approved cannot transition to rejected",
+		);
+	});
+
+	it("records approval decisions through the dedicated tool", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("approval-tool", cwd);
+		const approval = await createApprovalRequest(project.root, {
+			requester: "report-writer",
+			action: "write_report",
+			targetResource: "reports/drafts/summary.md",
+			proposedValue: "draft",
+			rationale: "Needs user sign-off.",
+		});
+		const tools = captureMetampTools();
+		const ctx = { cwd: project.root } as unknown as ExtensionContext;
+
+		const result = await getCapturedTool(tools, "metamp_record_approval").execute(
+			"approval-tool",
+			{ id: approval.id, status: "rejected" },
+			undefined,
+			() => undefined,
+			ctx,
+		);
+		const state = await loadProjectState(project.root);
+
+		expect(result.content).toEqual([{ type: "text", text: `Recorded ${approval.id}: rejected` }]);
+		expect(state.approvals.approvals[0]?.status).toBe("rejected");
 	});
 
 	it("enforces ownership in domain write tools", async () => {

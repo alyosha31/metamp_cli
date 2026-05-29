@@ -11,6 +11,7 @@ import { findProjectRoot, requireProjectRoot } from "./project/paths.ts";
 import { getPythonEnvPaths } from "./project/python-env.ts";
 import { formatProjectState, loadProjectState } from "./project/state.ts";
 import { listRuns, promoteRun } from "./runs/run-store.ts";
+import { METAMP_STARTUP_PROFILE } from "./ui/startup.ts";
 
 function printHelp(): void {
 	console.log(`metamp - ML copilot workbench
@@ -99,13 +100,16 @@ async function addDataCommand(args: string[]): Promise<void> {
 async function copilotCommand(args: string[]): Promise<void> {
 	const root = await requireProjectRoot(process.cwd());
 	const model = parseStringFlag(args, "--model");
-	const state = await loadProjectState(root);
-	console.log("Metamp status");
-	console.log(formatProjectState(state));
-	console.log("");
 	process.chdir(root);
-	const piArgs = model ? ["--model", model] : [];
-	await piMain(piArgs, { extensionFactories: [createMetampExtension()] });
+	process.env.METAMP_OFFLINE = "1";
+	process.env.METAMP_SKIP_VERSION_CHECK = "1";
+	const piArgs = ["--offline"];
+	if (model) piArgs.push("--model", model);
+	const mainOptions = {
+		extensionFactories: [createMetampExtension({ projectRoot: root })],
+		startupProfile: METAMP_STARTUP_PROFILE,
+	} as Parameters<typeof piMain>[1];
+	await piMain(piArgs, mainOptions);
 }
 
 async function runCommand(args: string[]): Promise<void> {
