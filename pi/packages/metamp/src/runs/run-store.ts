@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { readYamlFile, touchProject, writeYamlFile } from "../manifests/io.ts";
 import { METAMP_SCHEMA_VERSION, type ProjectManifest, type RunManifest, type RunStatus } from "../manifests/schema.ts";
+import { validateRunManifest } from "../manifests/validation.ts";
 import { assertProjectRelativeUnder, getMetampPaths, toProjectRelative } from "../project/paths.ts";
 
 export async function hashFile(filePath: string): Promise<string> {
@@ -31,7 +32,7 @@ export async function listRuns(root: string): Promise<RunManifest[]> {
 		if (!/^run_\d+$/.test(entry)) continue;
 		const manifestPath = path.join(runsDir, entry, "manifest.yaml");
 		try {
-			runs.push(await readYamlFile<RunManifest>(manifestPath));
+			runs.push(validateRunManifest(await readYamlFile<unknown>(manifestPath), manifestPath));
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
@@ -53,7 +54,8 @@ export function runDir(root: string, runId: string): string {
 }
 
 export async function readRun(root: string, runId: string): Promise<RunManifest> {
-	return readYamlFile<RunManifest>(path.join(runDir(root, runId), "manifest.yaml"));
+	const manifestPath = path.join(runDir(root, runId), "manifest.yaml");
+	return validateRunManifest(await readYamlFile<unknown>(manifestPath), manifestPath);
 }
 
 export async function writeRun(root: string, manifest: RunManifest): Promise<void> {

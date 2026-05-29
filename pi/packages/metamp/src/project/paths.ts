@@ -27,6 +27,7 @@ export interface MetampPaths {
 	metampDir: string;
 	runsDir: string;
 	handoffsDir: string;
+	activityLogPath: string;
 	projectManifest: string;
 	datasetsManifest: string;
 	decisionsManifest: string;
@@ -48,6 +49,7 @@ export function getMetampPaths(root: string): MetampPaths {
 		metampDir,
 		runsDir: path.join(metampDir, "runs"),
 		handoffsDir: path.join(metampDir, "handoffs"),
+		activityLogPath: path.join(metampDir, "activity.jsonl"),
 		projectManifest: path.join(metampDir, PROJECT_MANIFEST),
 		datasetsManifest: path.join(metampDir, DATASETS_MANIFEST),
 		decisionsManifest: path.join(metampDir, DECISIONS_MANIFEST),
@@ -115,6 +117,10 @@ export function assertProjectRelativeUnder(root: string, relativePath: string, a
 	return resolved;
 }
 
+export async function canonicalizeExisting(filePath: string): Promise<string> {
+	return realpath(filePath);
+}
+
 export async function realpathIfExists(filePath: string): Promise<string> {
 	try {
 		return await realpath(filePath);
@@ -122,6 +128,45 @@ export async function realpathIfExists(filePath: string): Promise<string> {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path.resolve(filePath);
 		throw error;
 	}
+}
+
+async function canonicalizeForContainment(filePath: string): Promise<string> {
+	let current = path.resolve(filePath);
+	const suffix: string[] = [];
+	for (;;) {
+		try {
+			return path.resolve(await realpath(current), ...suffix.reverse());
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			const parent = path.dirname(current);
+			if (parent === current) return path.resolve(current, ...suffix.reverse());
+			suffix.push(path.basename(current));
+			current = parent;
+		}
+	}
+}
+
+export async function assertInsidePathCanonical(parent: string, child: string, label = "path"): Promise<void> {
+	const [canonicalParent, canonicalChild] = await Promise.all([
+		canonicalizeForContainment(parent),
+		canonicalizeForContainment(child),
+	]);
+	if (!isInsidePath(canonicalParent, canonicalChild)) {
+		throw new Error(`${label} must stay inside ${parent}`);
+	}
+}
+
+export async function assertProjectRelativeUnderCanonical(
+	root: string,
+	relativePath: string,
+	allowedDir: string,
+): Promise<string> {
+	const resolved = assertProjectRelativeUnder(root, relativePath, allowedDir);
+	await Promise.all([
+		assertInsidePathCanonical(root, resolved, relativePath),
+		assertInsidePathCanonical(path.join(root, allowedDir), resolved, relativePath),
+	]);
+	return resolved;
 }
 
 export async function ensureProjectDirs(root: string): Promise<void> {

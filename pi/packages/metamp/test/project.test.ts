@@ -1,11 +1,16 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { proposeDecision, recordDecision } from "../src/decisions/decision-store.ts";
 import { buildHandoffMarkdown } from "../src/handoff/build-handoff.ts";
 import { initProject } from "../src/project/init.ts";
-import { assertProjectRelativeUnder, findProjectRoot } from "../src/project/paths.ts";
+import {
+	assertInsidePathCanonical,
+	assertProjectRelativeUnder,
+	assertProjectRelativeUnderCanonical,
+	findProjectRoot,
+} from "../src/project/paths.ts";
 import { assertProjectPythonEnv, getPythonVersion } from "../src/project/python-env.ts";
 import { formatProjectState, loadProjectState } from "../src/project/state.ts";
 
@@ -83,6 +88,61 @@ describe("Metamp project manifests", () => {
 		);
 	});
 
+	it("rejects sibling prefix collisions with canonical path checks", async () => {
+		const cwd = await tempRoot();
+		const result = await initProject("prefix", cwd);
+		const sibling = path.join(path.dirname(result.root), `${path.basename(result.root)}-evil`, "report.md");
+		await expect(assertInsidePathCanonical(result.root, sibling, "prefix collision")).rejects.toThrow(
+			"must stay inside",
+		);
+	});
+
+	it("rejects symlink escapes from allowed directories", async () => {
+		const cwd = await tempRoot();
+		const result = await initProject("symlink", cwd);
+		const outside = await tempRoot();
+		const linkPath = path.join(result.root, "recipes", "linked");
+		await symlink(outside, linkPath);
+
+		await expect(
+			assertProjectRelativeUnderCanonical(result.root, "recipes/linked/train.py", "recipes"),
+		).rejects.toThrow("must stay inside");
+		await expect(assertProjectRelativeUnderCanonical(result.root, "recipes/train.py", "recipes")).resolves.toBe(
+			path.join(result.root, "recipes", "train.py"),
+		);
+	});
+
+	it("fails fast on unsupported manifest schema versions", async () => {
+		const cwd = await tempRoot();
+		const result = await initProject("schema", cwd);
+		const manifestPath = path.join(result.root, ".metamp", "project.yaml");
+		const manifestText = await readFile(manifestPath, "utf8");
+		await writeFile(manifestPath, manifestText.replace("schemaVersion: 1", "schemaVersion: 2"), "utf8");
+
+		await expect(loadProjectState(result.root)).rejects.toThrow("Unsupported .metamp manifest schema version");
+	});
+
+	it("fails fast on malformed optional manifests", async () => {
+		const cwd = await tempRoot();
+		const result = await initProject("optional", cwd);
+		await writeFile(path.join(result.root, ".metamp", "approvals.yaml"), "schemaVersion: 1\napprovals: {}\n", "utf8");
+
+		await expect(loadProjectState(result.root)).rejects.toThrow("approvals manifest.approvals must be an array");
+	});
+
+	it("fails fast on malformed run manifests", async () => {
+		const cwd = await tempRoot();
+		const result = await initProject("runs", cwd);
+		const runDir = path.join(result.root, ".metamp", "runs", "run_001");
+		await mkdir(runDir, { recursive: true });
+		await writeFile(
+			path.join(runDir, "manifest.yaml"),
+			"schemaVersion: 1\nrunId: run_001\nstatus: succeeded\ncommand: []\n",
+			"utf8",
+		);
+
+		await expect(loadProjectState(result.root)).rejects.toThrow("run manifest.inputs must be an object");
+	});
 	it("records decision lifecycle state durably", async () => {
 		const cwd = await tempRoot();
 		const result = await initProject("decisions", cwd);

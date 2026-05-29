@@ -9,7 +9,7 @@ import {
 	type DatasetsManifest,
 	METAMP_SCHEMA_VERSION,
 } from "../manifests/schema.ts";
-import { assertInsidePath, getMetampPaths, isInsidePath, toProjectRelative } from "./paths.ts";
+import { assertInsidePathCanonical, getMetampPaths, toProjectRelative } from "./paths.ts";
 import { loadProjectState, saveProjectManifest } from "./state.ts";
 
 export interface RegisterDatasetOptions {
@@ -151,12 +151,18 @@ export async function registerDataset(
 	if (options.mode === "copy") {
 		await mkdir(paths.dataDir, { recursive: true });
 		const target = await uniqueDataPath(paths.dataDir, sourceAbsolute);
-		assertInsidePath(paths.dataDir, target, "dataset target");
+		await assertInsidePathCanonical(paths.dataDir, target, "dataset target");
 		await copyFile(sourceAbsolute, target);
 		storedPath = toProjectRelative(root, target);
 	} else {
-		storedPath = isInsidePath(root, sourceAbsolute) ? toProjectRelative(root, sourceAbsolute) : sourceAbsolute;
-		if (!isInsidePath(root, sourceAbsolute)) {
+		let insideProject = true;
+		try {
+			await assertInsidePathCanonical(root, sourceAbsolute, sourceAbsolute);
+		} catch {
+			insideProject = false;
+		}
+		storedPath = insideProject ? toProjectRelative(root, sourceAbsolute) : sourceAbsolute;
+		if (!insideProject) {
 			warning = "Linked dataset is outside the Metamp project; keep the source path stable for reproducibility.";
 		}
 	}

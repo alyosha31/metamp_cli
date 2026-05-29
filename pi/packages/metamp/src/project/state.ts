@@ -1,38 +1,50 @@
 import { readOptionalYamlFile, readYamlFile, writeYamlFile } from "../manifests/io.ts";
 import {
-	type ApprovalsManifest,
 	BUILTIN_MANIFEST_NAMESPACES,
-	type DatasetsManifest,
-	type DecisionsManifest,
+	type BuiltinManifestNamespace,
 	METAMP_SCHEMA_VERSION,
-	type NamespacedNotesManifest,
 	type ProjectManifest,
 	type ProjectState,
 } from "../manifests/schema.ts";
+import {
+	validateApprovalsManifest,
+	validateDatasetsManifest,
+	validateDecisionsManifest,
+	validateNamespacedNotesManifest,
+	validateProjectManifest,
+} from "../manifests/validation.ts";
 import { listRuns } from "../runs/run-store.ts";
 import { getMetampPaths } from "./paths.ts";
 
 export async function loadProjectState(root: string): Promise<ProjectState> {
 	const paths = getMetampPaths(root);
-	const [project, datasets, decisions, approvals, namespaceManifests, runs] = await Promise.all([
-		readYamlFile<ProjectManifest>(paths.projectManifest),
-		readYamlFile<DatasetsManifest>(paths.datasetsManifest),
-		readYamlFile<DecisionsManifest>(paths.decisionsManifest),
-		readOptionalYamlFile<ApprovalsManifest>(paths.approvalsManifest, {
+	const [projectRaw, datasetsRaw, decisionsRaw, approvalsRaw, namespaceRaw, runs] = await Promise.all([
+		readYamlFile<unknown>(paths.projectManifest),
+		readYamlFile<unknown>(paths.datasetsManifest),
+		readYamlFile<unknown>(paths.decisionsManifest),
+		readOptionalYamlFile<unknown>(paths.approvalsManifest, {
 			schemaVersion: METAMP_SCHEMA_VERSION,
 			approvals: [],
 		}),
 		Promise.all(
-			BUILTIN_MANIFEST_NAMESPACES.map((namespace) =>
-				readOptionalYamlFile<NamespacedNotesManifest>(paths.namespaceManifests[namespace], {
+			BUILTIN_MANIFEST_NAMESPACES.map(async (namespace) => ({
+				namespace,
+				manifest: await readOptionalYamlFile<unknown>(paths.namespaceManifests[namespace], {
 					schemaVersion: METAMP_SCHEMA_VERSION,
 					namespace,
 					entries: [],
 				}),
-			),
+			})),
 		),
 		listRuns(root),
 	]);
+	const project = validateProjectManifest(projectRaw, paths.projectManifest);
+	const datasets = validateDatasetsManifest(datasetsRaw, paths.datasetsManifest);
+	const decisions = validateDecisionsManifest(decisionsRaw, paths.decisionsManifest);
+	const approvals = validateApprovalsManifest(approvalsRaw, paths.approvalsManifest);
+	const namespaceManifests = namespaceRaw.map(({ namespace, manifest }) =>
+		validateNamespacedNotesManifest(manifest, paths.namespaceManifests[namespace as BuiltinManifestNamespace]),
+	);
 	return { project, datasets, decisions, namespaceManifests, approvals, runs };
 }
 
