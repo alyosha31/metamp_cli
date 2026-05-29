@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { LocalPythonExecutionBackend } from "../src/execution/local-python.ts";
 import { initProject } from "../src/project/init.ts";
 import { getPythonEnvPaths } from "../src/project/python-env.ts";
-import { listRuns, promoteRun, readRun } from "../src/runs/run-store.ts";
+import { createQueuedRun, listRuns, promoteRun, readRun } from "../src/runs/run-store.ts";
 
 async function tempRoot(): Promise<string> {
 	return mkdtemp(path.join(os.tmpdir(), "metamp-run-"));
@@ -68,6 +68,92 @@ describe("tracked local recipe execution", () => {
 		expect(result.manifest.status).toBe("failed");
 		expect(result.manifest.exitCode).toBe(3);
 		expect(result.manifest.error).toContain("Recipe exited with code 3");
+	});
+
+	it("allocates unique run ids under concurrent reservations", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("concurrent", cwd);
+		await writeFile(path.join(project.root, "recipes", "noop.py"), "print('ok')\n", "utf8");
+
+		const runs = await Promise.all([
+			createQueuedRun(project.root, { recipePath: "recipes/noop.py" }),
+			createQueuedRun(project.root, { recipePath: "recipes/noop.py" }),
+			createQueuedRun(project.root, { recipePath: "recipes/noop.py" }),
+		]);
+
+		expect(runs.map((run) => run.runId).sort()).toEqual(["run_001", "run_002", "run_003"]);
+	});
+
+	it("fails malicious output paths while preserving logs", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("malicious-output", cwd);
+		await writeFile(
+			path.join(project.root, "recipes", "escape.py"),
+			`import json\nimport os\nfrom pathlib import Path\nprint("escape attempt")\nprint("stderr note", file=__import__("sys").stderr)\nPath(os.environ["METAMP_OUTPUTS_FILE"]).write_text(json.dumps({"artifact": "../escape.txt"}))\nPath(os.environ["METAMP_METRICS_FILE"]).write_text(json.dumps({"ok": 1}))\n`,
+			"utf8",
+		);
+
+		const result = await new LocalPythonExecutionBackend().runRecipe({
+			projectRoot: project.root,
+			recipePath: "recipes/escape.py",
+		});
+		const manifest = await readRun(project.root, result.manifest.runId);
+		const stdout = await readFile(path.join(project.root, manifest.stdoutPath), "utf8");
+		const stderr = await readFile(path.join(project.root, manifest.stderrPath), "utf8");
+
+		expect(manifest.status).toBe("failed");
+		expect(manifest.error).toContain(
+			"Output path ../escape.txt must be under artifacts/, reports/, or the current run directory",
+		);
+		expect(stdout).toContain("escape attempt");
+		expect(stderr).toContain("stderr note");
+	});
+
+	it("fails oversized outputs metadata instead of reading it fully", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("oversized-output", cwd);
+		await writeFile(
+			path.join(project.root, "recipes", "oversized.py"),
+			`import json\nimport os\nfrom pathlib import Path\nPath(os.environ["METAMP_OUTPUTS_FILE"]).write_text('{' + '"blob":"' + ('x' * 300000) + '"}')\nPath(os.environ["METAMP_METRICS_FILE"]).write_text(json.dumps({"ok": 1}))\n`,
+			"utf8",
+		);
+
+		const result = await new LocalPythonExecutionBackend().runRecipe({
+			projectRoot: project.root,
+			recipePath: "recipes/oversized.py",
+		});
+
+		expect(result.manifest.status).toBe("failed");
+		expect(result.manifest.error).toContain("outputs.json exceeds");
+	});
+
+	it("rejects promoting missing or non-regular outputs", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("promote-guards", cwd);
+		const reportPath = path.join(project.root, "reports", "report.json");
+		await writeFile(
+			path.join(project.root, "recipes", "promote.py"),
+			`import json\nimport os\nfrom pathlib import Path\nreport = Path(os.environ["METAMP_PROJECT_ROOT"]) / "reports" / "report.json"\nreport.write_text(json.dumps({"ok": 1}))\nPath(os.environ["METAMP_METRICS_FILE"]).write_text(json.dumps({"ok": 1}))\nPath(os.environ["METAMP_OUTPUTS_FILE"]).write_text(json.dumps({"report": "reports/report.json"}))\n`,
+			"utf8",
+		);
+
+		const first = await new LocalPythonExecutionBackend().runRecipe({
+			projectRoot: project.root,
+			recipePath: "recipes/promote.py",
+		});
+		await rm(reportPath, { force: true });
+		await expect(promoteRun(project.root, first.manifest.runId)).rejects.toThrow();
+
+		await writeFile(
+			path.join(project.root, "recipes", "directory-output.py"),
+			`import json\nimport os\nfrom pathlib import Path\nreport_dir = Path(os.environ["METAMP_PROJECT_ROOT"]) / "reports" / "directory"\nreport_dir.mkdir(exist_ok=True)\nPath(os.environ["METAMP_METRICS_FILE"]).write_text(json.dumps({"ok": 1}))\nPath(os.environ["METAMP_OUTPUTS_FILE"]).write_text(json.dumps({"report": "reports/directory"}))\n`,
+			"utf8",
+		);
+		const second = await new LocalPythonExecutionBackend().runRecipe({
+			projectRoot: project.root,
+			recipePath: "recipes/directory-output.py",
+		});
+		await expect(promoteRun(project.root, second.manifest.runId)).rejects.toThrow("must reference a regular file");
 	});
 
 	it("fails clearly instead of falling back when the project venv is missing", async () => {

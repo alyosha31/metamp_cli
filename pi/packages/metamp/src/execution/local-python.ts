@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RunManifest } from "../manifests/schema.ts";
-import { assertInsidePath, assertProjectRelativeUnder, toProjectRelative } from "../project/paths.ts";
+import { assertProjectRelativeUnderCanonical, toProjectRelative } from "../project/paths.ts";
 import { assertProjectPythonEnv, getPythonVersion } from "../project/python-env.ts";
-import { createQueuedRun, runDir, updateRunStatus } from "../runs/run-store.ts";
+import { assertRunOutputPath, createQueuedRun, runDir, updateRunStatus } from "../runs/run-store.ts";
 import type { ExecutionBackend, RunRecipeInput, RunRecipeResult } from "./backend.ts";
+
+const MAX_JSON_BYTES = 256 * 1024;
 
 function parseRecord(text: string, label: string): Record<string, unknown> {
 	if (text.trim() === "") return {};
@@ -16,19 +18,49 @@ function parseRecord(text: string, label: string): Record<string, unknown> {
 	return parsed as Record<string, unknown>;
 }
 
+function validateOutputJson(value: unknown, label: string): unknown {
+	if (value === null || typeof value === "number" || typeof value === "boolean" || typeof value === "string") {
+		return value;
+	}
+	if (Array.isArray(value)) throw new Error(`${label} must not contain arrays`);
+	if (typeof value === "object") {
+		const result: Record<string, unknown> = {};
+		for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+			result[key] = validateOutputJson(nestedValue, `${label}.${key}`);
+		}
+		return result;
+	}
+	throw new Error(`${label} must be a JSON scalar or object`);
+}
+
+function parseOutputs(text: string): Record<string, unknown> {
+	const record = parseRecord(text, "outputs.json");
+	const outputs: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(record)) {
+		outputs[key] = validateOutputJson(value, `outputs.json.${key}`);
+	}
+	return outputs;
+}
+
 function parseMetrics(text: string): RunManifest["metrics"] {
 	const record = parseRecord(text, "metrics.json");
 	const metrics: RunManifest["metrics"] = {};
 	for (const [key, value] of Object.entries(record)) {
 		if (typeof value === "number" || typeof value === "string" || typeof value === "boolean" || value === null) {
 			metrics[key] = value;
+			continue;
 		}
+		throw new Error(`metrics.json.${key} must be a scalar or null`);
 	}
 	return metrics;
 }
 
-async function readJsonIfExists(filePath: string): Promise<string> {
+async function readJsonIfExists(filePath: string, label: string): Promise<string> {
 	try {
+		const fileInfo = await stat(filePath);
+		if (fileInfo.size > MAX_JSON_BYTES) {
+			throw new Error(`${label} exceeds ${MAX_JSON_BYTES} bytes`);
+		}
 		return await readFile(filePath, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
@@ -36,23 +68,10 @@ async function readJsonIfExists(filePath: string): Promise<string> {
 	}
 }
 
-function validateOutputPaths(root: string, runId: string, outputs: Record<string, unknown>): void {
-	const allowed = [path.join(root, "artifacts"), path.join(root, "reports"), runDir(root, runId)];
+async function validateOutputPaths(root: string, runId: string, outputs: Record<string, unknown>): Promise<void> {
 	for (const value of Object.values(outputs)) {
 		if (typeof value !== "string") continue;
-		const absolute = path.resolve(root, value);
-		if (
-			!allowed.some((dir) => {
-				try {
-					assertInsidePath(dir, absolute);
-					return true;
-				} catch {
-					return false;
-				}
-			})
-		) {
-			throw new Error(`Output path ${value} must be under artifacts/, reports/, or the current run directory`);
-		}
+		await assertRunOutputPath(root, runId, value, false);
 	}
 }
 
@@ -60,7 +79,7 @@ export class LocalPythonExecutionBackend implements ExecutionBackend {
 	readonly kind = "local-python";
 
 	async runRecipe(input: RunRecipeInput, signal?: AbortSignal): Promise<RunRecipeResult> {
-		const recipeAbsolute = assertProjectRelativeUnder(input.projectRoot, input.recipePath, "recipes");
+		const recipeAbsolute = await assertProjectRelativeUnderCanonical(input.projectRoot, input.recipePath, "recipes");
 		const recipeRelative = toProjectRelative(input.projectRoot, recipeAbsolute);
 		const python = await assertProjectPythonEnv(input.projectRoot);
 		const version = await getPythonVersion(python.pythonPath);
@@ -118,9 +137,9 @@ export class LocalPythonExecutionBackend implements ExecutionBackend {
 				writeFile(stderrPath, stderr, "utf8"),
 				writeFile(logsPath, `${stdout}${stderr}`, "utf8"),
 			]);
-			const outputs = parseRecord(await readJsonIfExists(outputsPath), "outputs.json");
-			validateOutputPaths(input.projectRoot, manifest.runId, outputs);
-			const metrics = parseMetrics(await readJsonIfExists(metricsPath));
+			const outputs = parseOutputs(await readJsonIfExists(outputsPath, "outputs.json"));
+			await validateOutputPaths(input.projectRoot, manifest.runId, outputs);
+			const metrics = parseMetrics(await readJsonIfExists(metricsPath, "metrics.json"));
 			const endedAt = new Date().toISOString();
 			current = await updateRunStatus(input.projectRoot, current, exitCode === 0 ? "succeeded" : "failed", {
 				endedAt,

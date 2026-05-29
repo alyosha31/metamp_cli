@@ -143,6 +143,7 @@ describe("Metamp project manifests", () => {
 
 		await expect(loadProjectState(result.root)).rejects.toThrow("run manifest.inputs must be an object");
 	});
+
 	it("records decision lifecycle state durably", async () => {
 		const cwd = await tempRoot();
 		const result = await initProject("decisions", cwd);
@@ -156,6 +157,9 @@ describe("Metamp project manifests", () => {
 
 		expect(approved.approvedValue).toBe("fare_amount");
 		expect(state.decisions.decisions[0]?.status).toBe("approved");
+		await expect(recordDecision(result.root, { id: pending.id, status: "rejected" })).rejects.toThrow(
+			"Decision approved cannot transition to rejected",
+		);
 	});
 
 	it("builds handoff content from manifests instead of chat history", async () => {

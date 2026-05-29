@@ -1,10 +1,23 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { readYamlFile, touchProject, writeYamlFile } from "../manifests/io.ts";
 import { METAMP_SCHEMA_VERSION, type ProjectManifest, type RunManifest, type RunStatus } from "../manifests/schema.ts";
 import { validateRunManifest } from "../manifests/validation.ts";
-import { assertProjectRelativeUnder, getMetampPaths, toProjectRelative } from "../project/paths.ts";
+import {
+	assertInsidePathCanonical,
+	assertProjectRelativeUnderCanonical,
+	getMetampPaths,
+	toProjectRelative,
+} from "../project/paths.ts";
+
+const ALLOWED_RUN_TRANSITIONS: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
+	queued: ["queued", "running", "cancelled"],
+	running: ["running", "succeeded", "failed", "cancelled"],
+	succeeded: ["succeeded"],
+	failed: ["failed"],
+	cancelled: ["cancelled"],
+};
 
 export async function hashFile(filePath: string): Promise<string> {
 	const hash = createHash("sha256");
@@ -16,6 +29,60 @@ export async function hashFile(filePath: string): Promise<string> {
 function runNumber(runId: string): number {
 	const match = /^run_(\d+)$/.exec(runId);
 	return match ? Number(match[1]) : 0;
+}
+
+function formatRunId(index: number): string {
+	return `run_${String(index).padStart(3, "0")}`;
+}
+
+function assertRunStatusTransition(current: RunStatus, next: RunStatus): void {
+	if (ALLOWED_RUN_TRANSITIONS[current].includes(next)) return;
+	throw new Error(`Invalid run status transition ${current} -> ${next}`);
+}
+
+function outputRoots(root: string, runId: string): string[] {
+	return [path.join(root, "artifacts"), path.join(root, "reports"), runDir(root, runId)];
+}
+
+export async function assertRunOutputPath(
+	root: string,
+	runId: string,
+	outputPath: string,
+	requireRegularFile = false,
+): Promise<string> {
+	const absolute = path.resolve(root, outputPath);
+	let allowed = false;
+	for (const candidateRoot of outputRoots(root, runId)) {
+		try {
+			await assertInsidePathCanonical(candidateRoot, absolute, outputPath);
+			allowed = true;
+			break;
+		} catch {}
+	}
+	if (!allowed) {
+		throw new Error(`Output path ${outputPath} must be under artifacts/, reports/, or the current run directory`);
+	}
+	if (requireRegularFile) {
+		const fileInfo = await stat(absolute);
+		if (!fileInfo.isFile()) throw new Error(`Output path ${outputPath} must reference a regular file`);
+	}
+	return absolute;
+}
+
+async function reserveRunDirectory(root: string): Promise<{ runId: string; dir: string }> {
+	const runsDir = getMetampPaths(root).runsDir;
+	await mkdir(runsDir, { recursive: true });
+	for (let index = 1; ; index += 1) {
+		const runId = formatRunId(index);
+		const dir = path.join(runsDir, runId);
+		try {
+			await mkdir(dir);
+			return { runId, dir };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+			throw error;
+		}
+	}
 }
 
 export async function listRuns(root: string): Promise<RunManifest[]> {
@@ -43,7 +110,7 @@ export async function listRuns(root: string): Promise<RunManifest[]> {
 export async function allocateRunId(root: string): Promise<string> {
 	const runs = await listRuns(root);
 	const max = runs.reduce((value, run) => Math.max(value, runNumber(run.runId)), 0);
-	return `run_${String(max + 1).padStart(3, "0")}`;
+	return formatRunId(max + 1);
 }
 
 export function runDir(root: string, runId: string): string {
@@ -71,10 +138,9 @@ export interface CreateRunInput {
 }
 
 export async function createQueuedRun(root: string, input: CreateRunInput): Promise<RunManifest> {
-	const recipeAbsolute = assertProjectRelativeUnder(root, input.recipePath, "recipes");
+	const recipeAbsolute = await assertProjectRelativeUnderCanonical(root, input.recipePath, "recipes");
 	const recipeRelative = toProjectRelative(root, recipeAbsolute);
-	const runId = await allocateRunId(root);
-	const dir = runDir(root, runId);
+	const { runId, dir } = await reserveRunDirectory(root);
 	const manifest: RunManifest = {
 		schemaVersion: METAMP_SCHEMA_VERSION,
 		runId,
@@ -104,6 +170,7 @@ export async function updateRunStatus(
 	status: RunStatus,
 	updates: Partial<RunManifest> = {},
 ): Promise<RunManifest> {
+	assertRunStatusTransition(manifest.status, status);
 	const next: RunManifest = { ...manifest, ...updates, status };
 	await writeRun(root, next);
 	return next;
@@ -116,9 +183,7 @@ export async function promoteRun(root: string, runId: string): Promise<ProjectMa
 	}
 	for (const value of Object.values(run.outputs)) {
 		if (typeof value !== "string") continue;
-		const absolute = path.resolve(root, value);
-		if (!absolute.startsWith(path.resolve(root))) continue;
-		await stat(absolute);
+		await assertRunOutputPath(root, run.runId, value, true);
 	}
 	const paths = getMetampPaths(root);
 	const project = await readYamlFile<ProjectManifest>(paths.projectManifest);
