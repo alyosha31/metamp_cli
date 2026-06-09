@@ -18,6 +18,12 @@ function nextDecisionId(decisions: DecisionsManifest): string {
 	return `decision_${String(max + 1).padStart(3, "0")}`;
 }
 
+function assertRecordDecisionTransition(current: DecisionStatus, next: DecisionStatus): void {
+	if (next === current) return;
+	if (next === "pending") throw new Error("Decision record status cannot remain pending");
+	if (current !== "pending") throw new Error(`Decision ${current} cannot transition to ${next}`);
+}
+
 export interface ProposeDecisionInput {
 	type: DecisionType;
 	proposedValue: unknown;
@@ -63,15 +69,16 @@ export async function recordDecision(root: string, input: RecordDecisionInput): 
 	if (index < 0) {
 		throw new Error(`Unknown decision ${input.id}`);
 	}
+	const current = state.decisions.decisions[index];
+	assertRecordDecisionTransition(current.status, input.status);
+	if (current.status === input.status) return current;
 	const now = new Date().toISOString();
 	const updated: DecisionEntry = {
-		...state.decisions.decisions[index],
+		...current,
 		status: input.status,
 		approvedValue:
-			input.status === "approved"
-				? (input.approvedValue ?? state.decisions.decisions[index].proposedValue)
-				: input.approvedValue,
-		rationale: input.rationale ?? state.decisions.decisions[index].rationale,
+			input.status === "approved" ? (input.approvedValue ?? current.proposedValue) : current.approvedValue,
+		rationale: input.rationale ?? current.rationale,
 		decidedBy: input.decidedBy ?? "user",
 		timestamp: now,
 	};

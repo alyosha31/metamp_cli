@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import YAML from "yaml";
@@ -10,7 +11,7 @@ export async function readYamlFile<T>(filePath: string): Promise<T> {
 
 export async function writeYamlFile(filePath: string, value: unknown): Promise<void> {
 	await mkdir(path.dirname(filePath), { recursive: true });
-	const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+	const tmpPath = `${filePath}.${randomUUID()}.tmp`;
 	await writeFile(tmpPath, YAML.stringify(value, { lineWidth: 0 }), "utf8");
 	await rename(tmpPath, filePath);
 }

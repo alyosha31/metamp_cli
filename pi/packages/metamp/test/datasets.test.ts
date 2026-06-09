@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -46,6 +46,21 @@ describe("dataset registry", () => {
 		const result = await registerDataset(project.root, csvPath, { mode: "link" });
 
 		expect(result.dataset.storedPath).toBe(csvPath);
+		expect(result.warning).toContain("outside the Metamp project");
+	});
+
+	it("treats symlinked external data as external for canonical reproducibility checks", async () => {
+		const cwd = await tempRoot();
+		const project = await initProject("symlink-links", cwd);
+		const externalDir = await tempRoot();
+		const csvPath = path.join(externalDir, "linked.csv");
+		await writeFile(csvPath, "x\n1\n", "utf8");
+		const linkPath = path.join(project.root, "data", "linked.csv");
+		await symlink(csvPath, linkPath);
+
+		const result = await registerDataset(project.root, linkPath, { mode: "link" });
+
+		expect(result.dataset.storedPath).toBe(linkPath);
 		expect(result.warning).toContain("outside the Metamp project");
 	});
 });

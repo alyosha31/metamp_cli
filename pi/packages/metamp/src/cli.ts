@@ -8,8 +8,10 @@ import { createMetampExtension } from "./extension.ts";
 import { registerDataset } from "./project/datasets.ts";
 import { initProject } from "./project/init.ts";
 import { findProjectRoot, requireProjectRoot } from "./project/paths.ts";
+import { getPythonEnvPaths } from "./project/python-env.ts";
 import { formatProjectState, loadProjectState } from "./project/state.ts";
 import { listRuns, promoteRun } from "./runs/run-store.ts";
+import { METAMP_STARTUP_PROFILE } from "./ui/startup.ts";
 
 function printHelp(): void {
 	console.log(`metamp - ML copilot workbench
@@ -72,8 +74,11 @@ async function initCommand(args: string[]): Promise<void> {
 	const name = args[0];
 	if (!name) throw new Error("Usage: metamp init <project-name|.>");
 	const result = await initProject(name, process.cwd());
+	const python = getPythonEnvPaths(result.root);
 	console.log(`Initialized Metamp project: ${result.project.name}`);
+	console.log("created .venv");
 	if (name !== ".") console.log(`cd ${path.relative(process.cwd(), result.root) || "."}`);
+	console.log(`${python.relativePythonPath} -m pip install <packages>`);
 	console.log("metamp add-data <path>");
 	console.log("metamp copilot");
 }
@@ -95,13 +100,16 @@ async function addDataCommand(args: string[]): Promise<void> {
 async function copilotCommand(args: string[]): Promise<void> {
 	const root = await requireProjectRoot(process.cwd());
 	const model = parseStringFlag(args, "--model");
-	const state = await loadProjectState(root);
-	console.log("Metamp status");
-	console.log(formatProjectState(state));
-	console.log("");
 	process.chdir(root);
-	const piArgs = model ? ["--model", model] : [];
-	await piMain(piArgs, { extensionFactories: [createMetampExtension()] });
+	process.env.METAMP_OFFLINE = "1";
+	process.env.METAMP_SKIP_VERSION_CHECK = "1";
+	const piArgs = ["--offline"];
+	if (model) piArgs.push("--model", model);
+	const mainOptions = {
+		extensionFactories: [createMetampExtension({ projectRoot: root })],
+		startupProfile: METAMP_STARTUP_PROFILE,
+	} as Parameters<typeof piMain>[1];
+	await piMain(piArgs, mainOptions);
 }
 
 async function runCommand(args: string[]): Promise<void> {

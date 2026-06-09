@@ -1,13 +1,14 @@
 {
 	"name": "@earendil-works/pi-coding-agent",
-	"version": "0.75.5",
+	"version": "0.1.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
 	"piConfig": {
-		"configDir": ".pi"
+		"name": "metamp",
+		"configDir": ".metamp"
 	},
 	"bin": {
-		"pi": "dist/cli.js"
+		"metamp-harness": "dist/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",

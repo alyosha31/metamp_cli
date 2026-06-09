@@ -48,16 +48,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "child_process";
-import {
-	APP_NAME,
-	APP_TITLE,
-	getAgentDir,
-	getAuthPath,
-	getDebugLogPath,
-	getDocsPath,
-	getShareViewerUrl,
-	VERSION,
-} from "../../config.ts";
+import { getAgentDir, getAuthPath, getDebugLogPath, getDocsPath, getShareViewerUrl, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type {
@@ -121,6 +112,11 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import {
+	type ResolvedStartupProductProfile,
+	resolveStartupProductProfile,
+	type StartupProductProfile,
+} from "./startup-product-profile.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -232,6 +228,8 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
+	/** Product-specific startup branding and notice behavior. */
+	startupProfile?: StartupProductProfile;
 }
 
 export class InteractiveMode {
@@ -341,6 +339,7 @@ export class InteractiveMode {
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private options: InteractiveModeOptions;
+	private startupProductProfile: ResolvedStartupProductProfile;
 
 	// Convenience accessors
 	private get session(): AgentSession {
@@ -359,6 +358,7 @@ export class InteractiveMode {
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
 		this.options = options;
+		this.startupProductProfile = resolveStartupProductProfile(options.startupProfile);
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 		});
@@ -598,7 +598,13 @@ export class InteractiveMode {
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
+			const logo = [
+				...this.startupProductProfile.logoLines.map((line) => theme.bold(theme.fg("accent", line))),
+				`${theme.bold(theme.fg("accent", this.startupProductProfile.name))}${theme.fg("dim", ` v${this.version}`)} ${theme.fg(
+					"muted",
+					this.startupProductProfile.tagline,
+				)}`,
+			].join("\n");
 
 			// Build startup instructions using keybinding hint helpers
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
@@ -635,10 +641,7 @@ export class InteractiveMode {
 				"dim",
 				`Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`,
 			);
-			const onboarding = theme.fg(
-				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
-			);
+			const onboarding = theme.fg("dim", this.startupProductProfile.helpText);
 			this.builtInHeader = new ExpandableText(
 				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
 				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
@@ -703,9 +706,9 @@ export class InteractiveMode {
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
 		const sessionName = this.sessionManager.getSessionName();
 		if (sessionName) {
-			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
+			this.ui.terminal.setTitle(`${this.startupProductProfile.title} - ${sessionName} - ${cwdBasename}`);
 		} else {
-			this.ui.terminal.setTitle(`${APP_TITLE} - ${cwdBasename}`);
+			this.ui.terminal.setTitle(`${this.startupProductProfile.title} - ${cwdBasename}`);
 		}
 	}
 
@@ -716,19 +719,21 @@ export class InteractiveMode {
 	async run(): Promise<void> {
 		await this.init();
 
-		// Start version check asynchronously
-		checkForNewPiVersion(this.version).then((newRelease) => {
-			if (newRelease) {
-				this.showNewVersionNotification(newRelease);
-			}
-		});
+		if (!this.startupProductProfile.disableUpdateNotices) {
+			// Start version check asynchronously
+			checkForNewPiVersion(this.version).then((newRelease) => {
+				if (newRelease) {
+					this.showNewVersionNotification(newRelease);
+				}
+			});
 
-		// Start package update check asynchronously
-		this.checkForPackageUpdates().then((updates) => {
-			if (updates.length > 0) {
-				this.showPackageUpdateNotification(updates);
-			}
-		});
+			// Start package update check asynchronously
+			this.checkForPackageUpdates().then((updates) => {
+				if (updates.length > 0) {
+					this.showPackageUpdateNotification(updates);
+				}
+			});
+		}
 
 		// Check tmux keyboard setup asynchronously
 		this.checkTmuxKeyboardSetup().then((warning) => {
@@ -789,7 +794,7 @@ export class InteractiveMode {
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
-		if (process.env.PI_OFFLINE) {
+		if (process.env.METAMP_OFFLINE || this.startupProductProfile.disableUpdateNotices) {
 			return [];
 		}
 
@@ -885,7 +890,7 @@ export class InteractiveMode {
 	}
 
 	private reportInstallTelemetry(version: string): void {
-		if (process.env.PI_OFFLINE) {
+		if (process.env.METAMP_OFFLINE) {
 			return;
 		}
 
@@ -3588,7 +3593,10 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(release: LatestPiRelease): void {
-		const action = theme.fg("accent", `${APP_NAME} update`);
+		if (this.startupProductProfile.disableUpdateNotices) {
+			return;
+		}
+		const action = theme.fg("accent", `${this.startupProductProfile.name} update`);
 		const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
 		const changelogUrl = "https://pi.dev/changelog";
 		const changelogLink = getCapabilities().hyperlinks
@@ -3617,7 +3625,10 @@ export class InteractiveMode {
 	}
 
 	showPackageUpdateNotification(packages: string[]): void {
-		const action = theme.fg("accent", `${APP_NAME} update`);
+		if (this.startupProductProfile.disableUpdateNotices) {
+			return;
+		}
+		const action = theme.fg("accent", `${this.startupProductProfile.name} update`);
 		const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
 		const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 

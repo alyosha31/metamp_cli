@@ -43,6 +43,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
+import type { StartupProductProfile } from "./modes/interactive/startup-product-profile.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
@@ -419,14 +420,15 @@ async function promptForMissingSessionCwd(
 
 export interface MainOptions {
 	extensionFactories?: ExtensionFactory[];
+	startupProfile?: StartupProductProfile;
 }
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
-	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
+	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.METAMP_OFFLINE);
 	if (offlineMode) {
-		process.env.PI_OFFLINE = "1";
-		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.METAMP_OFFLINE = "1";
+		process.env.METAMP_SKIP_VERSION_CHECK = "1";
 	}
 
 	if (process.platform === "win32") {
@@ -669,9 +671,9 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
+	const startupBenchmark = isTruthyEnvFlag(process.env.METAMP_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
-		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
+		console.error(chalk.red("Error: METAMP_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
 	}
 
@@ -686,6 +688,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
+			startupProfile: options?.startupProfile,
 		});
 		if (startupBenchmark) {
 			await interactiveMode.init();
